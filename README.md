@@ -150,3 +150,6 @@ pip install google-genai requests pillow python-dotenv
 This does support sending images to the chatbot however it does not yet support generating images.
 If anyone has any ideas on how to make image generation work with google voice, let me know.
 If you encounter any issues or have questions during setup, don't hesitate to reach out for help. Enjoy!
+
+
+# BEWARE GOOGLE MAY BAN YOUR GOOGLE VOICE ACCOUNT IF THEY FIND OUT YOU ARE USING IT FOR THIS CHATBOT.
