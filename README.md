@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Python 3.7+**
+- **Python 3.12**
 - **Google Cloud Account** with Generative AI API access
 - **Gmail Account** with IMAP access enabled (suggested to create a new Google account specifically for this project)
 - **Google Voice Number** with text forwarding to Gmail
