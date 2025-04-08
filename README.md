@@ -1,126 +1,237 @@
-# SMS to Google Gemini.
+
+# SMS to Google Gemini
+
+A Python-powered SMS chatbot that connects your Google Voice number to Google's Generative AI. When a text is sent to your Google Voice number, it’s forwarded via Gmail, processed by the AI, and the response is sent back as a text message. Enjoy automated, interactive conversations on your mobile device!
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+  - [Downloading the Script](#downloading-the-script)
+  - [Creating a Virtual Environment (optional)](#creating-a-virtual-environment-optional)
+  - [Installing Dependencies](#installing-dependencies)
+  - [Environment Variables](#environment-variables)
+- [Configuration](#configuration)
+  - [Obtaining Google GenAI API Key](#obtaining-google-genai-api-key)
+  - [Setting Up Gmail API](#setting-up-gmail-api)
+  - [Configuring Google Voice Number](#configuring-google-voice-number)
+- [Running the Script](#running-the-script)
+- [Communicating with FelzyBot](#communicating-with-felzybot)
+- [Troubleshooting & FAQs](#troubleshooting--faqs)
+- [Contribution Guidelines](#contribution-guidelines)
+- [License](#license)
+- [Disclaimer](#disclaimer)
+
+---
+
+## Overview
+
+SMS to Google Gemini is designed to create a seamless relay between your Google Voice texts and Google's Generative AI. It's perfect for automating SMS responses with an intelligent twist—build your own interactive chatbot with just a few configurations while maintaining privacy and control over your messages.
+
+---
 
 ## Prerequisites
 
-- **Python 3.12**
-- **Google Cloud Account** with Generative AI API access and Gmail API access.
-- **Gmail Account** (suggested to create a new Google account specifically for this project)
-- **Google Voice Number** with text forwarding to Gmail
-- **API Key** for Google's Generative AI
-- **Google Oauth2 set up
+Before you begin, ensure you have the following:
+
+- **Python 3** (download [here](https://www.python.org/downloads/))
+- A **Google Cloud Account** with access to the Generative AI API and Gmail API.
+- A **Gmail Account** (consider creating a dedicated account for this project).
+- A **Google Voice Number** with texts forwarded to Gmail.
+- An **API Key** for Google's Generative AI.
+- **Google OAuth2** setup for Gmail API access.
+
+---
 
 ## Setup
 
-### Download the Script
-Save the `SMS to Gemini.py` file to your local machine.
+### Downloading the Script
 
-### Create a Virtual Environment (optional)
+Save the `SMS to Gemini.py` file onto your local machine.
+
+### Creating a Virtual Environment (optional)
+
+To keep your dependencies isolated, create a virtual environment:
+
 ```bash
 python -m venv venv
-source venv/bin/activate
-```
- On Windows use `venv\Scripts\activate`
-
- **If you are going to use a Virtual Environment make sure to install the "python-dotenv" library.**
- ```bash
-  pip install python-dotenv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
+If you choose this route, install the \`python-dotenv\` library to handle your environment variables:
 
-### Install Dependencies
+```bash
+pip install python-dotenv
+```
+
+### Installing Dependencies
+
+Install all required Python packages by running:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### Set Up Environment Variables
-**Add these settings to your system Environment Variables:**
+### Key Packages
 
+The following Python packages are integral to the functionality of the script:
+
+- **google-genai**: Interact with Google’s Generative AI API, enabling AI-driven operations.
+- **requests**: A widely used library for making HTTP requests in Python.
+- **google-auth-oauthlib**: Handles the OAuth 2.0 authorization flow for interacting with Google's APIs.
+- **google-api-python-client**: Provides a Python interface to various Google APIs, including the Gmail API.
+- **pillow**: A Python library for image processing tasks such as opening, manipulating, and saving images.
+- **python-dotenv**: Simplifies the management of environment variables during development by reading them from a `.env` file.
+  
+### Environment Variables
+
+Add the following settings to your system environment variables or create a \`.env\` file in your project directory:
+
+```dotenv
 API_KEY=your_google_genai_api_key
+```
+
+This simplifies configuration and helps keep sensitive keys secure.
+
+---
 
 ## Configuration
 
-### Obtain Google GenAI API Key
+### Obtaining Google GenAI API Key
 
-Go to Google Cloud Console.
+1. **Access Google Cloud Console:**
+   - Go to the [Google Cloud Console](https://console.cloud.google.com/).
 
-Create a new project or select an existing one.
+2. **Create or Select a Project:**
+   - Create a new project or select an existing one.
 
-Enable the Generative AI APIs:
+3. **Enable Generative AI APIs:**
+   - Navigate to **APIs & Services ➔ Library**, then search for "Generative AI" and enable the API.
 
-Navigate to APIs & Services ➔ Library.
+4. **Create Credentials:**
+   - Go to **APIs & Services ➔ Credentials**, click **Create Credentials ➔ API Key**, and copy the generated API key.
 
-Search for Generative AI and enable it.
+5. **Add API Key:**
+   - Use this key as your \`API_KEY\` in the environment variable settings.
 
-Go to APIs & Services ➔ Credentials.
+### Setting Up Gmail API
 
-Click Create Credentials ➔ API Key.
+To allow your script to check and send emails using Gmail, follow these steps:
 
-Copy the API key and use it as your "API_KEY"
+1. **Visit Google Developers Console:**
+   - Go to the [Google Cloud Console](https://console.cloud.google.com/).
 
-### Obtain and Configure Google Voice Number
+2. **Create or Select a Project:**
+   - Use your existing project for the Google GenAI API or create a new one.
 
-Go to Google Voice and sign in with the same google account as your gmail account.
+3. **Enable the Gmail API:**
+   - Click on **Enable APIs and Services**.
+   - In the API Library, search for **Gmail API** and select it.
+   - Click **Enable**.
 
-Follow the prompts to Set up a new number.
+4. **Configure OAuth Consent Screen:**
+   - Navigate to **APIs & Services ➔ OAuth consent screen**.
+   - Choose **External** if your application is for testing or public use, then click **Create**.
+   - Fill in the required fields like **Application Name**, **Support Email**, etc.
+   - Save and continue through the scopes page (you can add minimal scopes for just sending and reading Gmail messages).
 
-**Once you have your Google Voice number, enable text forwarding:**
+5. **Create OAuth 2.0 Credentials:**
+   - Go to **APIs & Services ➔ Credentials**.
+   - Click **Create Credentials ➔ OAuth client ID**.
+   - Choose **Desktop App** and give it an appropriate name.
+   - Click **Create**.
+   - Download the JSON file containing your OAuth credentials (commonly named \`credentials.json\`), and place it in your project root.
 
-Click on the Settings icon (gear icon) in the top right corner.
 
-Navigate to the Messages tab.
+### Configuring Google Voice Number
 
-Enable Forward messages to email.
+1. **Sign in to Google Voice:**
+   - Log in at [Google Voice](https://voice.google.com/) using the same Gmail account configured above.
 
-Ensure your Gmail address is correct.
+2. **Set Up a New Google Voice Number:**
+   - Follow the on-screen prompts to obtain a new number.
+
+3. **Enable Text Forwarding:**
+   - Click the **Settings** icon (gear icon) at the top right.
+   - Navigate to the **Messages** tab.
+   - Enable **Forward messages to email** and verify that your Gmail address is correct.
+
+---
 
 ## Running the Script
 
 Start the script by running:
 
 ```bash
-python SMS to Gemini.py
+python "SMS to Gemini.py"
 ```
 
-The script will:
+The script will perform the following tasks:
+- Log in to your Gmail account via OAuth2.
+- Continuously check for new messages sent to your Google Voice number.
+- Process incoming texts and generate responses using Google's Generative AI.
+- Send replies back via email to your Google Voice number, which will then forward them as texts.
 
-Log in to your Gmail account.
+Press \`Ctrl+C\` to stop the script.
 
-Continuously check for new messages sent to your Google Voice number.
+---
 
-Process incoming texts and generate responses using Google's Generative AI.
+## Communicating with FelzyBot
 
-Send replies back via email to your Google Voice number, which will forward them as texts.
+To interact with the chatbot:
 
-*To stop the script, press Ctrl+C.*
+- **Send a text message** to your configured Google Voice number.
+- **FelzyBot** will receive the forwarded email.
+- The **Generative AI processes your message** and crafts a response.
+- The **reply is emailed back** to your Google Voice, which pushes it to your phone as a text message.
 
-## Communicating with FelzyBot:
-Send a text message to your Google Voice number.
+---
 
-FelzyBot will receive the forwarded email and generate a response.
+## Troubleshooting & FAQs
 
-The response will be sent back to your phone as a text message via Google Voice.
+### Common Issues
 
-## Dependencies
-Ensure you have the following Python packages installed:
+- **Gmail API Authorization**:  
+  If you encounter issues during OAuth2 authorization, verify that your \`credentials.json\` file is in the correct location and that your OAuth consent screen is properly configured.
+  
+- **API Key Errors**:  
+  Ensure that your \`API_KEY\` environment variable matches the key generated from your Google Cloud Console.
+  
+- **Dependency Issues**:  
+  Check that all dependencies are installed by re-running \`pip install -r requirements.txt\`. If you experience version conflicts, consider using a virtual environment.
 
-google-genai
+### FAQs
 
-requests
+**Q: How do I check if the script is receiving texts?**  
+A: Look for log messages indicating new emails being processed. Use print statements or logging for debugging.
 
-pillow
+**Q: Can I integrate image processing with this tool?**  
+A: Yes, while the current version supports sending images, image generation isn’t supported yet. Suggestions for image generation integrations are welcome.
 
-python-dotenv
+---
 
-You can install them all with:
+## Contribution Guidelines
 
-```bash
-pip install google-genai requests pillow python-dotenv
-```
+Contributions are welcome! If you encounter issues, have suggestions, or want to improve the code:
 
-### Note: 
-This does support sending images to the chatbot however it does not yet support generating images.
-If anyone has any ideas on how to make image generation work with google voice, let me know.
-If you encounter any issues or have questions during setup, don't hesitate to reach out for help. Enjoy!
+- **Fork the repository.**
+- **Create a new branch** for your feature or bug fix.
+- **Submit a Pull Request** with a detailed description of your changes.
+- **Open an Issue** if you have any questions or improvements to discuss.
 
+For more details, refer to the \`CONTRIBUTING.md\` file included in the repository (if available).
 
-# BEWARE GOOGLE MAY BAN YOUR GOOGLE VOICE ACCOUNT IF THEY FIND OUT YOU ARE USING IT FOR THIS CHATBOT.
+---
+
+## License
+
+Distributed under the MIT License. See the \`LICENSE\` file for more details.
+
+---
+
+## Disclaimer
+
+**BEWARE:** Google may ban your Google Voice account if they find out you are using it for automated chatbot interactions. Use this tool responsibly and at your own risk.
