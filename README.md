@@ -3,11 +3,11 @@
 ## Prerequisites
 
 - **Python 3.12**
-- **Google Cloud Account** with Generative AI API access
-- **Gmail Account** with IMAP access enabled (suggested to create a new Google account specifically for this project)
+- **Google Cloud Account** with Generative AI API access and Gmail API access.
+- **Gmail Account** (suggested to create a new Google account specifically for this project)
 - **Google Voice Number** with text forwarding to Gmail
 - **API Key** for Google's Generative AI
-- **Gmail App Password** (requires 2FA to be enabled)
+- **Google Oauth2 set up
 
 ## Setup
 
@@ -37,36 +37,7 @@ pip install -r requirements.txt
 
 API_KEY=your_google_genai_api_key
 
-EMAIL_ADDRESS=your_email@gmail.com
-
-EMAIL_PASSWORD=your_Gmail_app_password
-
 ## Configuration
-
-### Enable IMAP in Gmail
-Go to Gmail Settings ➔ See all settings.
-
-Navigate to the Forwarding and POP/IMAP tab.
-
-In the IMAP access section, select Enable IMAP.
-
-Click Save Changes.
-
-### Generate an App Password (requires 2FA)** 
-
-Go to Google Account Security.
-
-Enable 2-Step Verification if it's not already enabled.
-
-After enabling 2FA, search App Passwords in the search bar of your Google account settings page.
-
-You might need to sign in again.
-
-You can name the app password whatever you like.
-
-Click Generate.
-
-Copy the 16-character password and use it as your "EMAIL_PASSWORD" (DO NOT include the spaces in the passowrd).
 
 ### Obtain Google GenAI API Key
 
