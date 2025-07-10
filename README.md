@@ -38,7 +38,7 @@ SMS to Google Gemini is designed to create a seamless relay between your Google 
 Before you begin, ensure you have the following:
 
 - **Python 3** (download [here](https://www.python.org/downloads/))
-- A **Google Cloud Account** with access to the Generative AI API and Gmail API.
+- A [**Google Cloud Account**](https://console.cloud.google.com/) with access to the Generative AI API and Gmail API.
 - A **Gmail Account** (consider creating a dedicated account for this project).
 - A **Google Voice Number** with texts forwarded to Gmail.
 - An **API Key** for Google's Generative AI.
