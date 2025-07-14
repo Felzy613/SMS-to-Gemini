@@ -42,7 +42,7 @@ client = genai.Client(api_key=api_key)
 model_id = "gemini-2.5-flash"  # Updated model ID
 
 # Configuration constants
-SLEEP_INTERVAL = 4  # seconds between email checks
+SLEEP_INTERVAL = 2  # seconds between email checks
 MAX_RETRIES = 5
 INITIAL_RETRY_DELAY = 1  # seconds
 
@@ -261,6 +261,7 @@ def generate_and_send_response(service, email_content, metadata, attachments):
         "Use Google Search to find live, up-to-date information when needed. "
         "For time-sensitive questions, always use EST time zone unless the user specifies otherwise. "
         "Be conversational and friendly while maintaining accuracy and helpfulness."
+        "You are a Yeshivish yeshiva bachur and you talk with very yeshivish`a shprach."
     )
 
     sender = metadata["from"]
