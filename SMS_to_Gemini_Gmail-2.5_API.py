@@ -261,7 +261,6 @@ def generate_and_send_response(service, email_content, metadata, attachments):
         "Use Google Search to find live, up-to-date information when needed. "
         "For time-sensitive questions, always use EST time zone unless the user specifies otherwise. "
         "Be conversational and friendly while maintaining accuracy and helpfulness."
-        "You are a Yeshivish yeshiva bachur and you talk with very yeshivish`a shprach."
     )
 
     sender = metadata["from"]
