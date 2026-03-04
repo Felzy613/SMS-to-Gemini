@@ -1,416 +1,415 @@
+import asyncio
+import io
+import logging
 import os
 import sys
 import time
-import uuid
-import logging
-import base64
-import pickle
-import mimetypes
-import subprocess
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
+
 import requests
-import email
-
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from flask import Flask, Response, request
 from PIL import Image
+from twilio.twiml.messaging_response import MessagingResponse
 
-# Gmail API and Google Auth libraries
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-
-# Generative AI-related libraries
 from google import genai
-from google.genai import types
-from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
+from google.genai.types import GenerateContentConfig, GoogleSearch, Tool
+
+MCP_AVAILABLE = False
+ClientSession: Any = None
+StdioServerParameters: Any = None
+stdio_client: Any = None
+
+try:
+    from mcp import ClientSession
+    from mcp.client.stdio import stdio_client
+
+    try:
+        from mcp import StdioServerParameters
+    except Exception:
+        from mcp.client.stdio import StdioServerParameters
+
+    MCP_AVAILABLE = True
+except Exception:  # pragma: no cover - runtime fallback if mcp isn't installed
+    MCP_AVAILABLE = False
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 # ----------------- Configuration -----------------
 
-logging.basicConfig(level=logging.INFO)
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+INITIAL_RETRY_DELAY = float(os.getenv("INITIAL_RETRY_DELAY", "1"))
+MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-3-flash-preview")
 
-# Directory to save attachments
-ATTACHMENT_DIR = "attachments"
-os.makedirs(ATTACHMENT_DIR, exist_ok=True)
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+SPORTS_MCP_SERVER_PATH = os.getenv(
+    "SPORTS_MCP_SERVER_PATH",
+    str(Path(__file__).resolve().with_name("sports_mcp_server.py")),
+)
+SPORTS_MCP_PYTHON = os.getenv("SPORTS_MCP_PYTHON", sys.executable)
+SPORTS_SOURCE = os.getenv("SPORTS_SOURCE", "mcp").strip().lower()
 
-# Gmail API scope for reading and sending emails
-SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+LEAGUE_KEYWORDS: Dict[str, List[str]] = {
+    "mlb": ["mlb", "baseball"],
+    "nhl": ["nhl", "hockey"],
+    "nba": ["nba", "basketball"],
+    "nfl": ["nfl", "football"],
+}
+LEAGUE_ENDPOINTS: Dict[str, Dict[str, str]] = {
+    "mlb": {"sport": "baseball", "league": "mlb", "label": "MLB"},
+    "nhl": {"sport": "hockey", "league": "nhl", "label": "NHL"},
+    "nba": {"sport": "basketball", "league": "nba", "label": "NBA"},
+    "nfl": {"sport": "football", "league": "nfl", "label": "NFL"},
+}
+GENERIC_SPORTS_KEYWORDS = [
+    "sports scores",
+    "sports score",
+    "scoreboard",
+    "live scores",
+    "games today",
+]
 
-# Set up Generative AI configuration - Updated to Gemini 2.5 Flash
-google_search_tool = Tool(google_search=GoogleSearch())
 api_key = os.getenv("API_KEY")
+if not api_key:
+    raise RuntimeError("Missing required environment variable: API_KEY")
+
 client = genai.Client(api_key=api_key)
-model_id = "gemini-2.5-flash"  # Updated model ID
+google_search_tool = Tool(google_search=GoogleSearch())
 
-# Configuration constants
-SLEEP_INTERVAL = 2  # seconds between email checks
-MAX_RETRIES = 5
-INITIAL_RETRY_DELAY = 1  # seconds
+chat_sessions: Dict[str, Any] = {}
+app = Flask(__name__)
 
-# Global dictionary mapping sender email addresses to their persistent chat sessions
-chat_sessions = {}
+SYSTEM_INSTRUCTION = (
+    "When provided with live sports scores, include them in your response if relevant. "
+    "When provided with images, analyze them carefully and incorporate their content into your response. "
+    "Generate creative and helpful replies based on the user's message and any provided data. "
+    "Keep your answers concise but informative - not too long but not too short. "
+    "Use Google Search to find live, up-to-date information when needed. "
+    "For time-sensitive questions, always use EST time zone unless the user specifies otherwise. "
+    "Be conversational and friendly while maintaining accuracy and helpfulness."
+)
 
-# ----------------- Gmail API Setup -----------------
 
-def gmail_authenticate():
-    """
-    Authenticate with Gmail API using OAuth2.
-    This function expects a 'credentials.json' file in the same directory.
-    It caches tokens in a file named 'token.pickle' for future runs.
-    """
-    creds = None
-    if os.path.exists('token.pickle'):
-        with open('token.pickle', 'rb') as token:
-            creds = pickle.load(token)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.pickle', 'wb') as token:
-            pickle.dump(creds, token)
-    service = build('gmail', 'v1', credentials=creds)
-    return service
+# ----------------- Helpers -----------------
 
-def login_gmail():
-    try:
-        service = gmail_authenticate()
-        return service
-    except Exception as e:
-        logging.error(f"Error setting up Gmail API: {e}")
-        return None
-
-# ----------------- Email Reading -----------------
-
-def read_gmail(service):
-    """
-    Use the Gmail API to search for unread messages sent from "@txt.voice.google.com",
-    process the messages to extract text content and image attachments, and mark them as read.
-    Now, if there is at least one image attachment, the email is processed even if no text is found.
-    """
-    try:
-        query = "is:unread from:@txt.voice.google.com"
-        results = service.users().messages().list(userId='me', q=query).execute()
-        messages = results.get('messages', [])
-        if not messages:
-            return None, None, None
-
-        emails_content = []
-        email_metadata = []
-        email_attachments = []
-
-        for msg in messages:
-            msg_id = msg['id']
-            message = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
-
-            payload = message.get('payload', {})
-            headers = payload.get('headers', [])
-            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '(No Subject)')
-            from_field = next((h['value'] for h in headers if h['name'] == 'From'), '')
-            to_field = next((h['value'] for h in headers if h['name'] == 'To'), '')
-            in_reply_to = next((h['value'] for h in headers if h['name'] == 'In-Reply-To'), '')
-
-            email_text_content = None
-            attachments = []
-
-            # If message is not multipart, use the body directly.
-            if 'parts' not in payload:
-                data = payload.get('body', {}).get('data', '')
-                if data:
-                    decoded_data = base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8', errors='ignore')
-                    email_text_content = decoded_data.replace("<https://voice.google.com>", "").strip()
-                    end_marker = "YOUR ACCOUNT"
-                    if end_marker in email_text_content:
-                        email_text_content = email_text_content.split(end_marker)[0].strip()
-            else:
-                # Process each part: text and image.
-                for part in payload.get('parts', []):
-                    mime_type = part.get('mimeType', '')
-                    filename = part.get('filename')
-                    if mime_type.startswith('text/plain'):
-                        data = part.get('body', {}).get('data', '')
-                        if data:
-                            decoded_data = base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8', errors='ignore')
-                            email_text_content = decoded_data.replace("<https://voice.google.com>", "").strip()
-                            end_marker = "YOUR ACCOUNT"
-                            if end_marker in email_text_content:
-                                email_text_content = email_text_content.split(end_marker)[0].strip()
-                    elif mime_type.startswith('image/'):
-                        body_dict = part.get('body', {})
-                        data = body_dict.get('data', None)
-                        if not data and 'attachmentId' in body_dict:
-                            attachment_id = body_dict['attachmentId']
-                            attachment = service.users().messages().attachments().get(
-                                userId='me', messageId=msg_id, id=attachment_id
-                            ).execute()
-                            data = attachment.get('data', None)
-                        if data:
-                            if not filename:
-                                ext = mimetypes.guess_extension(mime_type)
-                                filename = f"{uuid.uuid4()}{ext}"
-                            filename = os.path.basename(filename)
-                            filepath = os.path.join(ATTACHMENT_DIR, filename)
-                            try:
-                                file_data = base64.urlsafe_b64decode(data.encode('UTF-8'))
-                                with open(filepath, "wb") as f:
-                                    f.write(file_data)
-                                attachments.append(filepath)
-                            except Exception as e:
-                                logging.error(f"Error saving attachment {filename}: {e}")
-
-            # Instead of skipping the email, forward if there's text OR at least one attachment.
-            if email_text_content is None and attachments:
-                email_text_content = ""  # Set text to empty string if only attachments exist.
-
-            if email_text_content is not None or attachments:
-                emails_content.append(email_text_content)
-                email_metadata.append({
-                    "message_id": message.get("id"),
-                    "from": from_field,
-                    "to": to_field,
-                    "subject": subject,
-                    "in_reply_to": in_reply_to
-                })
-                email_attachments.append(attachments)
-
-            # Mark email as read by removing the UNREAD label.
-            service.users().messages().modify(
-                userId='me',
-                id=msg_id,
-                body={'removeLabelIds': ['UNREAD']}
-            ).execute()
-
-        return emails_content, email_metadata, email_attachments
-
-    except Exception as e:
-        logging.error(f"Error reading Gmail messages: {e}")
-        return None, None, None
-
-# ----------------- Email Sending -----------------
-
-def send_email(service, subject, body, to_email, in_reply_to):
-    """
-    Use the Gmail API to send an email.
-    Construct a MIME message, encode it in base64, and send via the API.
-    """
-    try:
-        from_email = os.getenv("EMAIL_ADDRESS")
-        msg = MIMEMultipart()
-        msg["From"] = from_email
-        msg["To"] = to_email
-        msg["Subject"] = subject
-        if in_reply_to:
-            msg["In-Reply-To"] = in_reply_to
-            msg["References"] = in_reply_to
-        msg.attach(MIMEText(body, "plain"))
-        raw_msg = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-        message_body = {"raw": raw_msg}
-
-        sent_message = service.users().messages().send(userId="me", body=message_body).execute()
-        return sent_message
-    except Exception as e:
-        logging.error(f"Error sending email through Gmail API: {e}")
-
-# ----------------- Live NHL Scores -----------------
-
-def get_live_nhl_scores():
-    """
-    Retrieve live NHL scores from ESPN.
-    """
-    try:
-        url = "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard"
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
-        events = data.get('events', [])
-        if not events:
-            return "There are no NHL games scheduled for today."
-        scores = ""
-        for event in events:
-            competitions = event.get('competitions', [])
-            if competitions:
-                competition = competitions[0]
-                competitors = competition.get('competitors', [])
-                teams = {}
-                for competitor in competitors:
-                    team_name = competitor['team']['shortDisplayName']
-                    score = competitor['score']
-                    home_away = competitor['homeAway']
-                    teams[home_away] = {'name': team_name, 'score': score}
-                status = competition['status']['type']['shortDetail']
-                scores += f"{teams['away']['name']} {teams['away']['score']} - {teams['home']['name']} {teams['home']['score']} ({status})\n"
-        return scores.strip()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Network error occurred: {e}")
-        return "Unable to retrieve live NHL scores due to a network error."
-    except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
-        return "An unexpected error occurred while fetching live NHL scores."
-
-# ----------------- Response Generation -----------------
-
-def generate_and_send_response(service, email_content, metadata, attachments):
-    delay = INITIAL_RETRY_DELAY
-
-    # Updated system instruction for Gemini 2.5 Flash
-    system_instruction = (
-        "When provided with live NHL scores, include them in your response if relevant. "
-        "When provided with images, analyze them carefully and incorporate their content into your response. "
-        "Generate creative and helpful replies based on the user's message and any provided data. "
-        "Keep your answers concise but informative - not too long but not too short. "
-        "Use Google Search to find live, up-to-date information when needed. "
-        "For time-sensitive questions, always use EST time zone unless the user specifies otherwise. "
-        "Be conversational and friendly while maintaining accuracy and helpfulness."
+def create_chat():
+    return client.chats.create(
+        model=MODEL_ID,
+        config=GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=0.2,
+            tools=[google_search_tool],
+        ),
     )
 
-    sender = metadata["from"]
 
-    # Handle the '/new' command to start a fresh session.
-    if email_content.strip().lower() == "/new":
-        try:
-            new_chat = client.chats.create(
-                model=model_id,
-                config=GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.2,
-                    tools=[google_search_tool],
-                ),
+def get_or_create_chat(sender: str):
+    if sender not in chat_sessions:
+        chat_sessions[sender] = create_chat()
+        logging.info("Created new chat session for %s", sender)
+    return chat_sessions[sender]
+
+
+def normalize_response(text: str) -> str:
+    cleaned = text.replace("*", "-").strip()
+    return " ".join(cleaned.split())
+
+
+def detect_requested_leagues(text: str) -> List[str]:
+    lowered = text.lower()
+    requested = []
+
+    for league, keywords in LEAGUE_KEYWORDS.items():
+        if any(keyword in lowered for keyword in keywords):
+            requested.append(league)
+
+    if requested:
+        return requested
+
+    if any(keyword in lowered for keyword in GENERIC_SPORTS_KEYWORDS):
+        return list(LEAGUE_KEYWORDS.keys())
+
+    return []
+
+
+def _format_espn_event(event: Dict[str, Any]) -> str:
+    competitions = event.get("competitions", [])
+    if not competitions:
+        return ""
+
+    competition = competitions[0]
+    competitors = competition.get("competitors", [])
+    home = None
+    away = None
+
+    for competitor in competitors:
+        team_name = competitor.get("team", {}).get("shortDisplayName", "Unknown")
+        score = competitor.get("score", "0")
+        side = competitor.get("homeAway")
+        if side == "home":
+            home = {"name": team_name, "score": score}
+        elif side == "away":
+            away = {"name": team_name, "score": score}
+
+    if not home or not away:
+        return ""
+
+    status = (
+        competition.get("status", {}).get("type", {}).get("shortDetail")
+        or event.get("status", {}).get("type", {}).get("shortDetail")
+        or "Status unavailable"
+    )
+
+    return (
+        f"{away['name']} {away['score']} - "
+        f"{home['name']} {home['score']} ({status})"
+    )
+
+
+def _fetch_league_scores_direct(league_key: str) -> str:
+    config = LEAGUE_ENDPOINTS[league_key]
+    league_label = config["label"]
+    url = (
+        "https://site.api.espn.com/apis/site/v2/sports/"
+        f"{config['sport']}/{config['league']}/scoreboard"
+    )
+
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.exceptions.RequestException as exc:
+        logging.error("Network error fetching %s scores: %s", league_label, exc)
+        return f"{league_label}: Unable to retrieve scores due to a network error."
+    except ValueError as exc:
+        logging.error("Invalid JSON for %s scores: %s", league_label, exc)
+        return f"{league_label}: ESPN returned an invalid response."
+
+    events = payload.get("events", [])
+    if not events:
+        return f"{league_label}: No games scheduled today."
+
+    lines: List[str] = []
+    for event in events:
+        event_line = _format_espn_event(event)
+        if event_line:
+            lines.append(f"- {event_line}")
+
+    if not lines:
+        return f"{league_label}: No score data is available right now."
+
+    return f"{league_label}:\n" + "\n".join(lines)
+
+
+def get_live_sports_scores_direct(leagues: Sequence[str]) -> str:
+    league_keys = [league for league in leagues if league in LEAGUE_ENDPOINTS]
+    if not league_keys:
+        return "No supported leagues requested. Use one or more of: mlb, nhl, nba, nfl."
+
+    return "\n\n".join(_fetch_league_scores_direct(league_key) for league_key in league_keys)
+
+
+def _extract_mcp_text(tool_result: Any) -> str:
+    if getattr(tool_result, "isError", False):
+        return "The sports MCP server reported an error."
+
+    text_chunks: List[str] = []
+    for item in getattr(tool_result, "content", []) or []:
+        text = getattr(item, "text", None)
+        if text is None and isinstance(item, dict):
+            text = item.get("text")
+        if text:
+            text_chunks.append(str(text))
+
+    if not text_chunks:
+        return "No score data was returned by the sports MCP server."
+
+    return "\n".join(text_chunks).strip()
+
+
+async def _get_live_sports_scores_from_mcp_async(leagues: Sequence[str]) -> str:
+    if (
+        not MCP_AVAILABLE
+        or ClientSession is None
+        or StdioServerParameters is None
+        or stdio_client is None
+    ):
+        raise RuntimeError("Sports MCP support is unavailable because the `mcp` package is not installed.")
+
+    if not os.path.isfile(SPORTS_MCP_SERVER_PATH):
+        raise FileNotFoundError(f"Sports MCP server not found: {SPORTS_MCP_SERVER_PATH}")
+
+    server_parameters = StdioServerParameters(
+        command=SPORTS_MCP_PYTHON,
+        args=[SPORTS_MCP_SERVER_PATH],
+    )
+
+    leagues_arg = ",".join(leagues) if leagues else "all"
+
+    async with stdio_client(server_parameters) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            tool_result = await session.call_tool(
+                "get_live_scores",
+                {"leagues": leagues_arg},
             )
-            chat_sessions[sender] = new_chat
-            response_text = "New session started for you!"
-            send_email(service, "Response from FelzyBot", response_text, sender, metadata.get("in_reply_to", ""))
-            logging.info(f"New session created for {sender}")
-            return
-        except Exception as e:
-            logging.error(f"Error creating new session for {sender}: {e}")
-            return
+
+    return _extract_mcp_text(tool_result)
+
+
+def get_live_sports_scores_from_mcp(leagues: Sequence[str]) -> str:
+    try:
+        return asyncio.run(_get_live_sports_scores_from_mcp_async(leagues))
+    except Exception as exc:
+        logging.error("Failed to fetch sports scores from MCP: %s", exc)
+        raise
+
+
+def get_live_sports_scores(leagues: Sequence[str]) -> str:
+    if SPORTS_SOURCE == "direct":
+        return get_live_sports_scores_direct(leagues)
+
+    try:
+        return get_live_sports_scores_from_mcp(leagues)
+    except Exception:
+        logging.info("Falling back to direct ESPN scores because MCP is unavailable.")
+        return get_live_sports_scores_direct(leagues)
+
+
+def fetch_twilio_image(media_url: str) -> Optional[Image.Image]:
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        logging.warning(
+            "TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN not set; skipping media download"
+        )
+        return None
+
+    try:
+        response = requests.get(
+            media_url,
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            timeout=20,
+        )
+        response.raise_for_status()
+
+        image = Image.open(io.BytesIO(response.content))
+        image.load()  # Detach from the underlying byte stream.
+        return image
+    except Exception as exc:
+        logging.error("Failed to download media from Twilio URL %s: %s", media_url, exc)
+        return None
+
+
+def extract_images_from_twilio(form) -> List[Image.Image]:
+    images: List[Image.Image] = []
+
+    try:
+        num_media = int(form.get("NumMedia", "0"))
+    except ValueError:
+        num_media = 0
+
+    for index in range(num_media):
+        media_url = form.get(f"MediaUrl{index}")
+        media_content_type = form.get(f"MediaContentType{index}", "")
+
+        if not media_url:
+            continue
+        if not media_content_type.startswith("image/"):
+            logging.info("Skipping non-image media (%s): %s", media_content_type, media_url)
+            continue
+
+        image = fetch_twilio_image(media_url)
+        if image is not None:
+            images.append(image)
+
+    return images
+
+
+def generate_response(sender: str, incoming_text: str, images: List[Image.Image]) -> str:
+    delay = INITIAL_RETRY_DELAY
+
+    if incoming_text.strip().lower() == "/new":
+        chat_sessions[sender] = create_chat()
+        logging.info("Started a new session for %s", sender)
+        return "New session started for you!"
+
+    prompt = incoming_text.strip()
+    if not prompt and images:
+        prompt = (
+            "The user sent one or more images with no text. "
+            "Describe what you see and provide a helpful response."
+        )
+
+    requested_leagues = detect_requested_leagues(prompt)
+    if requested_leagues:
+        live_scores = get_live_sports_scores(requested_leagues)
+        requested_league_labels = ", ".join(league.upper() for league in requested_leagues)
+        prompt += (
+            f"\n\nHere are the current {requested_league_labels} scores "
+            f"from ESPN:\n{live_scores}"
+        )
+
+    message_contents: Any = [*images, prompt] if images else prompt
 
     for attempt in range(MAX_RETRIES):
         try:
-            # Load image attachments if available.
-            images = []
-            if attachments:
-                for filepath in attachments:
-                    try:
-                        img = Image.open(filepath)
-                        # Convert image to format compatible with Gemini 2.5 Flash
-                        images.append(img)
-                        logging.info(f"Loaded image attachment: {filepath}")
-                    except Exception as e:
-                        logging.error(f"Error loading image {filepath}: {e}")
+            chat = get_or_create_chat(sender)
+            model_response = chat.send_message(message_contents)
+            response_text = (model_response.text or "").strip()
 
-            # Fetch live NHL scores if mentioned.
-            live_scores = ""
-            nhl_keywords = ["nhl scores", "nhl score", "nhl today", "hockey scores", "hockey score"]
-            if any(keyword in email_content.lower() for keyword in nhl_keywords):
-                live_scores = get_live_nhl_scores()
-                logging.info("NHL scores requested and fetched")
+            if not response_text:
+                return "I could not generate a response right now. Please try again."
 
-            conversation_prompt = email_content
-            if live_scores:
-                conversation_prompt += f"\n\nHere are the current NHL scores:\n{live_scores}"
+            final_text = normalize_response(response_text)
+            logging.info("From: %s | Prompt: %s | Response: %s", sender, prompt, final_text)
+            return final_text
 
-            # Prepare the message contents for Gemini 2.5 Flash
-            if images:
-                message_contents = images + [conversation_prompt]
-            else:
-                message_contents = conversation_prompt
+        except Exception as exc:
+            logging.error(
+                "Error generating response (attempt %s/%s): %s",
+                attempt + 1,
+                MAX_RETRIES,
+                exc,
+            )
 
-            # Retrieve or create a persistent chat session for this sender.
-            if sender not in chat_sessions:
-                chat = client.chats.create(
-                    model=model_id,
-                    config=GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.2,
-                        tools=[google_search_tool],
-                    ),
-                )
-                chat_sessions[sender] = chat
-                logging.info(f"Created new chat session for {sender}")
-            else:
-                chat = chat_sessions[sender]
-
-            # Send message to Gemini 2.5 Flash
-            user_response = chat.send_message(message_contents)
-            response_text = user_response.text.strip()
-            
-            # Clean up the response text
-            combined_response = response_text.replace("\n\n", " ").replace("\n", " ").replace("*", "-").strip()
-
-            logging.info(f"Subject: {metadata['subject']}")
-            logging.info(f"Content: {email_content}")
-            logging.info(f"FelzyBot's Response: {combined_response}\n")
-
-            send_email(service, "Response from FelzyBot", combined_response, sender, metadata.get("in_reply_to", ""))
-            return
-
-        except Exception as e:
-            logging.error(f"Error generating or sending response (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
-            if "503" in str(e) or "rate limit" in str(e).lower():
-                logging.info(f"Service unavailable or rate limited. Retrying in {delay} seconds...")
+            if "503" in str(exc) or "rate limit" in str(exc).lower():
+                logging.info("Retrying in %s seconds", delay)
                 time.sleep(delay)
-                delay *= 2  # exponential backoff
-            else:
-                logging.error(f"Non-retryable error: {e}")
-                break
+                delay *= 2
+                continue
 
-    logging.error(f"Failed to generate response after {MAX_RETRIES} attempts for {sender}")
+            break
 
-# ----------------- Program Restart -----------------
+    return "I ran into an error processing that message. Please try again in a moment."
 
-def restart_program():
-    """
-    Restart the current program by launching a new instance of the script.
-    """
-    logging.info("Restarting script due to an error or scheduled restart...")
-    try:
-        # Get the current script path dynamically
-        script_path = os.path.abspath(__file__)
-        subprocess.Popen(["python", script_path])
-        sys.exit("Exiting current script.")
-    except Exception as e:
-        logging.error(f"Error restarting script: {e}")
-        sys.exit()
 
-# ----------------- Main Loop -----------------
+# ----------------- Twilio Routes -----------------
 
-def main():
-    try:
-        service = login_gmail()
-        if not service:
-            logging.error("Unable to initialize Gmail API service. Exiting.")
-            restart_program()
+@app.route("/health", methods=["GET"])
+def health_check():
+    return {"status": "ok"}, 200
 
-        logging.info("FelzyBot started with Gemini 2.5 Flash model")
-        login_time = time.time()
-        
-        while True:
-            emails_content, email_metadata, email_attachments = read_gmail(service)
-            if emails_content and email_metadata:
-                logging.info(f"Processing {len(emails_content)} new message(s)")
-                for email_content, metadata, attachments in zip(emails_content, email_metadata, email_attachments):
-                    generate_and_send_response(service, email_content, metadata, attachments)
-            else:
-                logging.info("No new messages at this time.")
 
-            # Optional: Restart the script every certain interval for maintenance
-            # Uncomment the lines below if you want periodic restarts
-            # if time.time() - login_time >= 7200:  # 2 hours
-            #     restart_program()
-            #     login_time = time.time()
+@app.route("/sms", methods=["POST"])
+def twilio_sms_webhook():
+    sender = request.form.get("From", "unknown")
+    incoming_text = (request.form.get("Body") or "").strip()
+    images = extract_images_from_twilio(request.form)
 
-            time.sleep(SLEEP_INTERVAL)
-            
-    except KeyboardInterrupt:
-        logging.info("FelzyBot has been stopped manually.")
-    except Exception as e:
-        if "EOF occurred in violation of protocol" in str(e):
-            logging.error("SSL protocol error detected. Restarting...")
-            restart_program()
-        else:
-            logging.error(f"Unexpected error: {e}")
-            restart_program()
+    if not incoming_text and not images:
+        response_text = "Send a text question or an image to get started."
+    else:
+        response_text = generate_response(sender, incoming_text, images)
+
+    twiml = MessagingResponse()
+    twiml.message(response_text)
+
+    return Response(str(twiml), mimetype="application/xml")
+
+
+# ----------------- Entrypoint -----------------
 
 if __name__ == "__main__":
-    main()
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host=host, port=port)
