@@ -1,11 +1,13 @@
 import asyncio
+import difflib
 import io
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import requests
 from flask import Flask, Response, request
@@ -39,7 +41,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 INITIAL_RETRY_DELAY = float(os.getenv("INITIAL_RETRY_DELAY", "1"))
-MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-3-flash-preview")
+MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-2.5-flash")
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
@@ -48,7 +50,6 @@ SPORTS_MCP_SERVER_PATH = os.getenv(
     str(Path(__file__).resolve().with_name("sports_mcp_server.py")),
 )
 SPORTS_MCP_PYTHON = os.getenv("SPORTS_MCP_PYTHON", sys.executable)
-SPORTS_SOURCE = os.getenv("SPORTS_SOURCE", "mcp").strip().lower()
 
 LEAGUE_KEYWORDS: Dict[str, List[str]] = {
     "mlb": ["mlb", "baseball"],
@@ -56,18 +57,60 @@ LEAGUE_KEYWORDS: Dict[str, List[str]] = {
     "nba": ["nba", "basketball"],
     "nfl": ["nfl", "football"],
 }
-LEAGUE_ENDPOINTS: Dict[str, Dict[str, str]] = {
-    "mlb": {"sport": "baseball", "league": "mlb", "label": "MLB"},
-    "nhl": {"sport": "hockey", "league": "nhl", "label": "NHL"},
-    "nba": {"sport": "basketball", "league": "nba", "label": "NBA"},
-    "nfl": {"sport": "football", "league": "nfl", "label": "NFL"},
+
+LEAGUE_TEAM_NAMES: Dict[str, List[str]] = {
+    "mlb": [
+        "diamondbacks", "braves", "orioles", "red sox", "cubs", "white sox",
+        "reds", "guardians", "rockies", "tigers", "astros", "royals", "angels",
+        "dodgers", "marlins", "brewers", "twins", "mets", "yankees", "athletics",
+        "phillies", "pirates", "padres", "giants", "mariners", "cardinals",
+        "rays", "rangers", "blue jays", "nationals",
+    ],
+    "nhl": [
+        "ducks", "utah hockey club", "bruins", "sabres", "flames", "hurricanes",
+        "blackhawks", "avalanche", "blue jackets", "stars", "red wings", "oilers",
+        "panthers", "kings", "wild", "canadiens", "predators", "devils",
+        "islanders", "rangers", "senators", "flyers", "penguins", "kraken",
+        "sharks", "blues", "lightning", "maple leafs", "canucks", "golden knights",
+        "capitals", "jets",
+    ],
+    "nba": [
+        "hawks", "celtics", "nets", "hornets", "bulls", "cavaliers", "mavericks",
+        "nuggets", "pistons", "warriors", "rockets", "pacers", "clippers",
+        "lakers", "grizzlies", "heat", "bucks", "timberwolves", "pelicans",
+        "knicks", "thunder", "magic", "sixers", "76ers", "suns", "trail blazers",
+        "blazers", "kings", "spurs", "raptors", "jazz", "wizards",
+    ],
+    "nfl": [
+        "cardinals", "falcons", "ravens", "bills", "panthers", "bears", "bengals",
+        "browns", "cowboys", "broncos", "lions", "packers", "texans", "colts",
+        "jaguars", "chiefs", "raiders", "chargers", "rams", "dolphins",
+        "vikings", "patriots", "saints", "giants", "jets", "eagles", "steelers",
+        "49ers", "niners", "seahawks", "buccaneers", "bucs", "titans",
+        "commanders",
+    ],
 }
+
 GENERIC_SPORTS_KEYWORDS = [
     "sports scores",
     "sports score",
     "scoreboard",
     "live scores",
     "games today",
+    "score",
+    "scores",
+    "game",
+    "games",
+    "tonight",
+    "matchup",
+    "matchups",
+    "play",
+    "playing",
+    "final",
+    "standings",
+    "schedule",
+    "won",
+    "lost",
 ]
 
 api_key = os.getenv("API_KEY")
@@ -116,98 +159,70 @@ def normalize_response(text: str) -> str:
     return " ".join(cleaned.split())
 
 
-def detect_requested_leagues(text: str) -> List[str]:
-    lowered = text.lower()
-    requested = []
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", text.lower())).strip()
 
-    for league, keywords in LEAGUE_KEYWORDS.items():
-        if any(keyword in lowered for keyword in keywords):
+
+def _build_ngrams(text: str, max_words: int = 3) -> List[str]:
+    normalized = _normalize_text(text)
+    tokens = [token for token in normalized.split() if token]
+    ngrams: List[str] = []
+    for n in range(1, max_words + 1):
+        for start in range(0, max(0, len(tokens) - n + 1)):
+            ngram = " ".join(tokens[start:start + n])
+            if len(ngram) >= 3:
+                ngrams.append(ngram)
+    return ngrams
+
+
+def _contains_exact_or_fuzzy_match(ngrams: Sequence[str], terms: Sequence[str], cutoff: float = 0.84) -> bool:
+    normalized_terms = [_normalize_text(term) for term in terms if term]
+
+    for ngram in ngrams:
+        for term in normalized_terms:
+            if ngram == term or ngram in term or term in ngram:
+                return True
+            if difflib.SequenceMatcher(None, ngram, term).ratio() >= cutoff:
+                return True
+    return False
+
+
+def detect_requested_leagues_and_team_intent(text: str) -> Tuple[List[str], bool]:
+    ngrams = _build_ngrams(text, max_words=3)
+    if not ngrams:
+        return [], False
+
+    requested: List[str] = []
+    team_intent = False
+
+    for league in ("mlb", "nhl", "nba", "nfl"):
+        league_terms = LEAGUE_KEYWORDS[league]
+        team_terms = LEAGUE_TEAM_NAMES[league]
+
+        has_league_match = _contains_exact_or_fuzzy_match(ngrams, league_terms, cutoff=0.82)
+        has_team_match = _contains_exact_or_fuzzy_match(ngrams, team_terms, cutoff=0.84)
+
+        if has_league_match or has_team_match:
             requested.append(league)
+        if has_team_match:
+            team_intent = True
 
     if requested:
-        return requested
+        unique_requested: List[str] = []
+        for league in ("mlb", "nhl", "nba", "nfl"):
+            if league in requested:
+                unique_requested.append(league)
+        return unique_requested, team_intent
 
-    if any(keyword in lowered for keyword in GENERIC_SPORTS_KEYWORDS):
-        return list(LEAGUE_KEYWORDS.keys())
-
-    return []
-
-
-def _format_espn_event(event: Dict[str, Any]) -> str:
-    competitions = event.get("competitions", [])
-    if not competitions:
-        return ""
-
-    competition = competitions[0]
-    competitors = competition.get("competitors", [])
-    home = None
-    away = None
-
-    for competitor in competitors:
-        team_name = competitor.get("team", {}).get("shortDisplayName", "Unknown")
-        score = competitor.get("score", "0")
-        side = competitor.get("homeAway")
-        if side == "home":
-            home = {"name": team_name, "score": score}
-        elif side == "away":
-            away = {"name": team_name, "score": score}
-
-    if not home or not away:
-        return ""
-
-    status = (
-        competition.get("status", {}).get("type", {}).get("shortDetail")
-        or event.get("status", {}).get("type", {}).get("shortDetail")
-        or "Status unavailable"
+    has_generic_sports_intent = _contains_exact_or_fuzzy_match(
+        ngrams,
+        GENERIC_SPORTS_KEYWORDS,
+        cutoff=0.83,
     )
+    if has_generic_sports_intent:
+        return ["mlb", "nhl", "nba", "nfl"], False
 
-    return (
-        f"{away['name']} {away['score']} - "
-        f"{home['name']} {home['score']} ({status})"
-    )
-
-
-def _fetch_league_scores_direct(league_key: str) -> str:
-    config = LEAGUE_ENDPOINTS[league_key]
-    league_label = config["label"]
-    url = (
-        "https://site.api.espn.com/apis/site/v2/sports/"
-        f"{config['sport']}/{config['league']}/scoreboard"
-    )
-
-    try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        payload = response.json()
-    except requests.exceptions.RequestException as exc:
-        logging.error("Network error fetching %s scores: %s", league_label, exc)
-        return f"{league_label}: Unable to retrieve scores due to a network error."
-    except ValueError as exc:
-        logging.error("Invalid JSON for %s scores: %s", league_label, exc)
-        return f"{league_label}: ESPN returned an invalid response."
-
-    events = payload.get("events", [])
-    if not events:
-        return f"{league_label}: No games scheduled today."
-
-    lines: List[str] = []
-    for event in events:
-        event_line = _format_espn_event(event)
-        if event_line:
-            lines.append(f"- {event_line}")
-
-    if not lines:
-        return f"{league_label}: No score data is available right now."
-
-    return f"{league_label}:\n" + "\n".join(lines)
-
-
-def get_live_sports_scores_direct(leagues: Sequence[str]) -> str:
-    league_keys = [league for league in leagues if league in LEAGUE_ENDPOINTS]
-    if not league_keys:
-        return "No supported leagues requested. Use one or more of: mlb, nhl, nba, nfl."
-
-    return "\n\n".join(_fetch_league_scores_direct(league_key) for league_key in league_keys)
+    return [], False
 
 
 def _extract_mcp_text(tool_result: Any) -> str:
@@ -228,7 +243,7 @@ def _extract_mcp_text(tool_result: Any) -> str:
     return "\n".join(text_chunks).strip()
 
 
-async def _get_live_sports_scores_from_mcp_async(leagues: Sequence[str]) -> str:
+async def _get_live_sports_scores_from_mcp_async(leagues: Sequence[str], query: str = "") -> str:
     if (
         not MCP_AVAILABLE
         or ClientSession is None
@@ -252,29 +267,27 @@ async def _get_live_sports_scores_from_mcp_async(leagues: Sequence[str]) -> str:
             await session.initialize()
             tool_result = await session.call_tool(
                 "get_live_scores",
-                {"leagues": leagues_arg},
+                {"leagues": leagues_arg, "query": query},
             )
 
     return _extract_mcp_text(tool_result)
 
 
-def get_live_sports_scores_from_mcp(leagues: Sequence[str]) -> str:
+def get_live_sports_scores_from_mcp(leagues: Sequence[str], query: str = "") -> str:
     try:
-        return asyncio.run(_get_live_sports_scores_from_mcp_async(leagues))
+        return asyncio.run(_get_live_sports_scores_from_mcp_async(leagues, query=query))
     except Exception as exc:
         logging.error("Failed to fetch sports scores from MCP: %s", exc)
         raise
 
 
-def get_live_sports_scores(leagues: Sequence[str]) -> str:
-    if SPORTS_SOURCE == "direct":
-        return get_live_sports_scores_direct(leagues)
-
+def get_live_sports_scores(leagues: Sequence[str], query: str = "") -> str:
     try:
-        return get_live_sports_scores_from_mcp(leagues)
+        return get_live_sports_scores_from_mcp(leagues, query=query)
     except Exception:
-        logging.info("Falling back to direct ESPN scores because MCP is unavailable.")
-        return get_live_sports_scores_direct(leagues)
+        return (
+            "Unable to retrieve live scores right now because the sports MCP service is unavailable."
+        )
 
 
 def fetch_twilio_image(media_url: str) -> Optional[Image.Image]:
@@ -340,13 +353,15 @@ def generate_response(sender: str, incoming_text: str, images: List[Image.Image]
             "Describe what you see and provide a helpful response."
         )
 
-    requested_leagues = detect_requested_leagues(prompt)
+    requested_leagues, has_team_intent = detect_requested_leagues_and_team_intent(prompt)
     if requested_leagues:
-        live_scores = get_live_sports_scores(requested_leagues)
+        team_query = prompt if has_team_intent else ""
+        live_scores = get_live_sports_scores(requested_leagues, query=team_query)
         requested_league_labels = ", ".join(league.upper() for league in requested_leagues)
         prompt += (
             f"\n\nHere are the current {requested_league_labels} scores "
-            f"from ESPN:\n{live_scores}"
+            "from ESPN via the sports MCP server:\n"
+            f"{live_scores}"
         )
 
     message_contents: Any = [*images, prompt] if images else prompt
