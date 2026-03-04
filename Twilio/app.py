@@ -1,7 +1,7 @@
 import importlib.util
 from pathlib import Path
 
-SCRIPT_PATH = Path(__file__).resolve().with_name("SMS_to_Gemini_Gmail-2.5_API.py")
+SCRIPT_PATH = Path(__file__).resolve().with_name("sms_gemini.py")
 
 spec = importlib.util.spec_from_file_location("sms_to_gemini_service", SCRIPT_PATH)
 if spec is None or spec.loader is None:

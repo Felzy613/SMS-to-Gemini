@@ -41,7 +41,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 INITIAL_RETRY_DELAY = float(os.getenv("INITIAL_RETRY_DELAY", "1"))
-MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-2.5-flash")
+MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-3.flash-preview")
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")

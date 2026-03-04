@@ -50,7 +50,7 @@ Before you begin, ensure you have the following:
 
 ### Downloading the Script
 
-Save the `SMS to Gemini.py` file onto your local machine.
+Save the `sms_gemini.py` file onto your local machine.
 
 ### Creating a Virtual Environment (optional)
 
@@ -166,7 +166,7 @@ To allow your script to check and send emails using Gmail, follow these steps:
 Start the script by running:
 
 ```bash
-python "SMS to Gemini.py"
+python sms_gemini.py
 ```
 
 The script will perform the following tasks:
@@ -175,7 +175,7 @@ The script will perform the following tasks:
 - Process incoming texts and generate responses using Google's Generative AI.
 - Send replies back via email to your Google Voice number, which will then forward them as texts.
 
-Press \`Ctrl+C\` to stop the script.
+Press `Ctrl+C` to stop the script.
 
 ---
 
