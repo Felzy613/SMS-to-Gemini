@@ -1,0 +1,7 @@
+flask
+gunicorn
+requests
+pillow
+google-genai
+twilio
+mcp
