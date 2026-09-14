@@ -1,27 +1,29 @@
+# SMS to Google Gemini (Google Voice / Gmail Version)
 
-# SMS to Google Gemini
+A Python chatbot that bridges your **Google Voice** number to **Google Gemini** through Gmail. Google Voice forwards incoming texts to a Gmail inbox as email; this script polls that inbox via the Gmail API, sends each message (and any MMS image attachments) to Gemini, and emails the reply back — which Google Voice then forwards out as a text.
 
-A Python-powered SMS chatbot that connects your Google Voice number to Google's Generative AI. When a text is sent to your Google Voice number, it’s forwarded via Gmail, processed by the AI, and the response is sent back as a text message. Enjoy automated, interactive conversations on your mobile device!
+> This is an older, polling-based implementation. The actively maintained version of this project is [`../Twilio/`](../Twilio/), a Flask webhook that talks to Twilio directly instead of relaying through Gmail/Google Voice. Use this folder if you specifically want to keep using a free Google Voice number rather than a paid Twilio number.
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [How It Works](#how-it-works)
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
-  - [Downloading the Script](#downloading-the-script)
-  - [Creating a Virtual Environment (optional)](#creating-a-virtual-environment-optional)
-  - [Installing Dependencies](#installing-dependencies)
+  - [Install Dependencies](#install-dependencies)
   - [Environment Variables](#environment-variables)
 - [Configuration](#configuration)
-  - [Obtaining Google GenAI API Key](#obtaining-google-genai-api-key)
-  - [Setting Up Gmail API](#setting-up-gmail-api)
-  - [Configuring Google Voice Number](#configuring-google-voice-number)
+  - [Google Gemini API Key](#google-gemini-api-key)
+  - [Gmail API & OAuth Credentials](#gmail-api--oauth-credentials)
+  - [Google Voice Number](#google-voice-number)
 - [Running the Script](#running-the-script)
-- [Communicating with FelzyBot](#communicating-with-felzybot)
-- [Troubleshooting & FAQs](#troubleshooting--faqs)
-- [Contribution Guidelines](#contribution-guidelines)
+- [Features](#features)
+- [Limitations](#limitations)
+- [Keeping It Running](#keeping-it-running)
+- [Troubleshooting & FAQ](#troubleshooting--faq)
+- [Security Notes](#security-notes)
 - [License](#license)
 - [Disclaimer](#disclaimer)
 
@@ -29,209 +31,151 @@ A Python-powered SMS chatbot that connects your Google Voice number to Google's 
 
 ## Overview
 
-SMS to Google Gemini is designed to create a seamless relay between your Google Voice texts and Google's Generative AI. It's perfect for automating SMS responses with an intelligent twist—build your own interactive chatbot with just a few configurations while maintaining privacy and control over your messages.
+Unlike the Twilio version (which receives an HTTP webhook the instant a text arrives), this script has no inbound endpoint at all — it's a long-running loop that **polls** a Gmail inbox every few seconds for new messages forwarded from Google Voice, processes them, and replies by sending an email back through the same thread. It needs to keep running continuously (see [Keeping It Running](#keeping-it-running)); it's not something you deploy as a typical web service.
 
----
+## How It Works
+
+1. **Authenticate** with the Gmail API using OAuth2 (`gmail_authenticate()` in [`sms_gemini.py`](sms_gemini.py)) — opens a browser for consent on first run, then caches a token in `token.pickle` for subsequent runs.
+2. **Poll** (`main()`) — every 4 seconds, search for unread mail from `@txt.voice.google.com` (Google Voice's forwarding address).
+3. **Parse** (`read_gmail()`) — for each match, extract the plain-text body and any image attachments (downloading them into a local `attachments/` folder), then mark the email read.
+4. **Generate a reply** (`generate_and_send_response()`) — send the text (plus any images) to a per-sender Gemini chat session, with Google Search enabled as a tool. If the message mentions NHL scores, live scores from ESPN are fetched and appended to the prompt first. Failed calls retry with exponential backoff.
+5. **Reply** (`send_email()`) — the Gemini response is emailed back to the original sender address, threaded via `In-Reply-To`/`References` headers. Google Voice picks this up and texts it out.
+
+Texting `/new` to the bot resets that sender's conversation history.
 
 ## Prerequisites
 
-Before you begin, ensure you have the following:
-
-- **Python 3** (download [here](https://www.python.org/downloads/))
-- A [**Google Cloud Account**](https://console.cloud.google.com/) with access to the Generative AI API and Gmail API.
-- A **Gmail Account** (consider creating a dedicated account for this project).
-- A **Google Voice Number** with texts forwarded to Gmail.
-- An **API Key** for Google's Generative AI.
-- **Google OAuth2** setup for Gmail API access.
-
----
+- **Python 3.10+**.
+- A **Google Cloud project** with the **Gmail API** enabled, and access to the **Gemini API**.
+- A **Gmail account** (a dedicated one is strongly recommended — see [Security Notes](#security-notes)) with **OAuth 2.0 Desktop app credentials**.
+- A **Google Voice number**, with SMS forwarding to that Gmail account's inbox enabled.
+- A **Gemini API key** from [Google AI Studio](https://aistudio.google.com/).
 
 ## Setup
 
-### Downloading the Script
-
-Save the `sms_gemini.py` file onto your local machine.
-
-### Creating a Virtual Environment (optional)
-
-To keep your dependencies isolated, create a virtual environment:
+### Install Dependencies
 
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+cd SMS-to-Gemini-Twilio/Google-Voice
 
-If you choose this route, install the \`python-dotenv\` library to handle your environment variables:
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-```bash
-pip install python-dotenv
-```
-
-### Installing Dependencies
-
-Install all required Python packages by running:
-
-```bash
 pip install -r requirements.txt
 ```
 
-### Key Packages
+`requirements.txt` includes:
 
-The following Python packages are integral to the functionality of the script:
+| Package | Purpose |
+|---|---|
+| `google-genai` | Gemini API client. |
+| `google-auth-oauthlib` | OAuth2 flow for Gmail API access. |
+| `google-api-python-client` | Gmail API client (`googleapiclient.discovery.build`). |
+| `requests` | HTTP calls (ESPN scoreboard API). |
+| `pillow` | Opens saved MMS image attachments before sending them to Gemini. |
+| `python-dotenv` | Loads `.env` automatically so you don't have to export env vars manually. |
 
-- **google-genai**: Interact with Google’s Generative AI API, enabling AI-driven operations.
-- **requests**: A widely used library for making HTTP requests in Python.
-- **google-auth-oauthlib**: Handles the OAuth 2.0 authorization flow for interacting with Google's APIs.
-- **google-api-python-client**: Provides a Python interface to various Google APIs, including the Gmail API.
-- **pillow**: A Python library for image processing tasks such as opening, manipulating, and saving images.
-- **python-dotenv**: Simplifies the management of environment variables during development by reading them from a `.env` file.
-  
 ### Environment Variables
 
-Add the following settings to your system environment variables or create a \`.env\` file in your project directory:
+Copy [`.env.example`](.env.example) to `.env` and fill in real values:
 
-```dotenv
+```env
 API_KEY=your_google_genai_api_key
+EMAIL_ADDRESS=your_gmail_address@gmail.com
 ```
 
-This simplifies configuration and helps keep sensitive keys secure.
+`GEMINI_MODEL_ID` and `LOG_LEVEL` are also supported, optionally — see the comments in `.env.example`.
 
----
+`credentials.json` and `token.pickle` are **not** environment variables — they're files the script reads directly from its working directory (see below). Both are gitignored; never commit them.
 
 ## Configuration
 
-### Obtaining Google GenAI API Key
+### Google Gemini API Key
 
-1. **Access Google Cloud Console:**
-   - Go to the [Google Cloud Console](https://console.cloud.google.com/).
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
+2. Create or select a project.
+3. Enable the Generative AI / Gemini API for it.
+4. Go to **APIs & Services → Credentials → Create Credentials → API Key**.
+5. Put the key in `.env` as `API_KEY`.
 
-2. **Create or Select a Project:**
-   - Create a new project or select an existing one.
+### Gmail API & OAuth Credentials
 
-3. **Enable Generative AI APIs:**
-   - Navigate to **APIs & Services ➔ Library**, then search for "Generative AI" and enable the API.
+1. In the same (or another) Google Cloud project, enable the **Gmail API** (**APIs & Services → Library**, search "Gmail API", **Enable**).
+2. Configure the **OAuth consent screen** (**APIs & Services → OAuth consent screen**): choose **External**, fill in the required fields, and add the `gmail.modify` scope (the script requests `https://www.googleapis.com/auth/gmail.modify`, needed to read messages and remove the unread label).
+3. Create credentials: **APIs & Services → Credentials → Create Credentials → OAuth client ID**, application type **Desktop app**.
+4. Download the resulting JSON file, rename it to `credentials.json`, and place it in this `Google-Voice/` directory (next to `sms_gemini.py`).
+5. On first run, the script opens a browser window for you to sign in and consent; it then writes `token.pickle` so future runs don't need to re-authenticate. Delete `token.pickle` to force re-authentication (e.g., if you change scopes or accounts).
 
-4. **Create Credentials:**
-   - Go to **APIs & Services ➔ Credentials**, click **Create Credentials ➔ API Key**, and copy the generated API key.
+### Google Voice Number
 
-5. **Add API Key:**
-   - Use this key as your \`API_KEY\` in the environment variable settings.
-
-### Setting Up Gmail API
-
-To allow your script to check and send emails using Gmail, follow these steps:
-
-1. **Visit Google Developers Console:**
-   - Go to the [Google Cloud Console](https://console.cloud.google.com/).
-
-2. **Create or Select a Project:**
-   - Use your existing project for the Google GenAI API or create a new one.
-
-3. **Enable the Gmail API:**
-   - Click on **Enable APIs and Services**.
-   - In the API Library, search for **Gmail API** and select it.
-   - Click **Enable**.
-
-4. **Configure OAuth Consent Screen:**
-   - Navigate to **APIs & Services ➔ OAuth consent screen**.
-   - Choose **External** if your application is for testing or public use, then click **Create**.
-   - Fill in the required fields like **Application Name**, **Support Email**, etc.
-   - Save and continue through the scopes page (you can add minimal scopes for just sending and reading Gmail messages).
-
-5. **Create OAuth 2.0 Credentials:**
-   - Go to **APIs & Services ➔ Credentials**.
-   - Click **Create Credentials ➔ OAuth client ID**.
-   - Choose **Desktop App** and give it an appropriate name.
-   - Click **Create**.
-   - Download the JSON file containing your OAuth credentials (commonly named \`credentials.json\`), and place it in your project root.
-
-
-### Configuring Google Voice Number
-
-1. **Sign in to Google Voice:**
-   - Log in at [Google Voice](https://voice.google.com/) using the same Gmail account configured above.
-
-2. **Set Up a New Google Voice Number:**
-   - Follow the on-screen prompts to obtain a new number.
-
-3. **Enable Text Forwarding:**
-   - Click the **Settings** icon (gear icon) at the top right.
-   - Navigate to the **Messages** tab.
-   - Enable **Forward messages to email** and verify that your Gmail address is correct.
-
----
+1. Sign in to [Google Voice](https://voice.google.com/) using the **same Gmail account** you just set up OAuth for.
+2. Get a Google Voice number if you don't already have one.
+3. Open **Settings → Messages** and enable **Forward messages to email**, confirming it points at that same Gmail address.
 
 ## Running the Script
-
-Start the script by running:
 
 ```bash
 python sms_gemini.py
 ```
 
-The script will perform the following tasks:
-- Log in to your Gmail account via OAuth2.
-- Continuously check for new messages sent to your Google Voice number.
-- Process incoming texts and generate responses using Google's Generative AI.
-- Send replies back via email to your Google Voice number, which will then forward them as texts.
+The script authenticates, then loops indefinitely: polling Gmail, generating Gemini replies, and sending them back. Press `Ctrl+C` to stop.
 
-Press `Ctrl+C` to stop the script.
+## Features
 
----
+- Per-sender persistent Gemini chat sessions (reset any one with `/new`).
+- Image (MMS) attachment support — downloaded, opened with Pillow, and sent to Gemini alongside the text.
+- Google Search tool enabled on every Gemini call for up-to-date answers.
+- Live **NHL** scores from ESPN, appended automatically when a message mentions them.
+- Automatic retry with exponential backoff on transient (503 / rate-limited) Gemini errors.
+- Self-restart on a known intermittent Gmail SSL error ("EOF occurred in violation of protocol") or if Gmail authentication fails on startup — relaunches itself as a new process rather than crashing out silently.
 
-## Communicating with FelzyBot
+## Limitations
 
-To interact with the chatbot:
+Compared to the [Twilio version](../Twilio/):
 
-- **Send a text message** to your configured Google Voice number.
-- **FelzyBot** will receive the forwarded email.
-- The **Generative AI processes your message** and crafts a response.
-- The **reply is emailed back** to your Google Voice, which pushes it to your phone as a text message.
+- **NHL scores only** — no MLB, NBA, or NFL support (the Twilio version supports all four with fuzzy team-name matching).
+- **No MCP integration** — sports scores are fetched with a plain HTTP call, not through a Model Context Protocol server.
+- **Polling, not push** — replies arrive within one polling interval (up to ~4 seconds) of Gmail actually delivering the forwarded message, rather than instantly on webhook delivery; Google's own mail delivery/forwarding latency is typically the larger factor.
+- **In-memory sessions** — like the Twilio version, `chat_sessions` lives only in process memory. Restarting the script clears everyone's conversation history.
+- **Single process only** — there's no concept of multiple workers here; run exactly one instance against a given Gmail account, or you'll get duplicate/racing replies.
 
----
+## Keeping It Running
 
-## Troubleshooting & FAQs
+Because this is a polling loop, not a request-driven web service, it needs to be kept alive continuously on a machine (or server) you control — it isn't a fit for typical serverless/PaaS hosting the way the Twilio version is. Options:
 
-### Common Issues
+- **`systemd`** (Linux): create a service unit similar to the one in [`../Twilio/DEPLOYMENT.md`](../Twilio/DEPLOYMENT.md#bare-vps-systemd--gunicorn), but with `ExecStart=.../.venv/bin/python sms_gemini.py` and no Gunicorn involved.
+- **`launchd`** (macOS) or **Task Scheduler** (Windows) for a background/login-time process.
+- A persistent `tmux`/`screen` session on a small always-on VPS, for a lighter-weight setup.
 
-- **Gmail API Authorization**:  
-  If you encounter issues during OAuth2 authorization, verify that your \`credentials.json\` file is in the correct location and that your OAuth consent screen is properly configured.
-  
-- **API Key Errors**:  
-  Ensure that your \`API_KEY\` environment variable matches the key generated from your Google Cloud Console.
-  
-- **Dependency Issues**:  
-  Check that all dependencies are installed by re-running \`pip install -r requirements.txt\`. If you experience version conflicts, consider using a virtual environment.
+Whatever you choose, make sure `credentials.json` and `token.pickle` are present in the working directory the process runs from, and that `.env` (or real environment variables) are loaded before `sms_gemini.py` starts.
 
-### FAQs
+## Troubleshooting & FAQ
 
-**Q: How do I check if the script is receiving texts?**  
-A: Look for log messages indicating new emails being processed. Use print statements or logging for debugging.
+**Gmail API authorization fails or loops back to the browser every run**
+Verify `credentials.json` is in the `Google-Voice/` directory and matches the OAuth client you configured. Delete `token.pickle` and re-run to force a fresh OAuth flow if you've changed scopes, projects, or accounts.
 
-**Q: Can I integrate image processing with this tool?**  
-A: Yes, while the current version supports sending images, image generation isn’t supported yet. Suggestions for image generation integrations are welcome.
+**`RuntimeError`/no response: API key errors**
+Confirm `API_KEY` in `.env` matches a real, active key from Google AI Studio, and that `.env` is actually being loaded (check for a `python-dotenv` import error in the logs — it should be installed by `requirements.txt`).
 
----
+**No replies are going out, but the script is running**
+Check that the Google Voice number's **Forward messages to email** setting still points at the correct Gmail address, and that `EMAIL_ADDRESS` in `.env` matches that same address.
 
-## Contribution Guidelines
+**Can it generate images, not just read them?**
+No — image *generation* isn't implemented; only image *understanding* (analyzing MMS attachments you send in) is supported.
 
-Contributions are welcome! If you encounter issues, have suggestions, or want to improve the code:
+**How do I check it's actually receiving texts?**
+Watch the logs (`LOG_LEVEL=DEBUG` for more detail) — each processed message logs its subject, content, and the bot's response.
 
-- **Fork the repository.**
-- **Create a new branch** for your feature or bug fix.
-- **Submit a Pull Request** with a detailed description of your changes.
-- **Open an Issue** if you have any questions or improvements to discuss.
+## Security Notes
 
-For more details, refer to the \`CONTRIBUTING.md\` file included in the repository (if available).
-
----
+- `credentials.json` (your OAuth client secret) and `token.pickle` (a cached, live OAuth token with mail read/modify access) are both gitignored. Never commit either — anyone with `token.pickle` can read and modify that Gmail inbox until the token is revoked.
+- MMS images are saved locally to `attachments/` (also gitignored) and are never deleted automatically — periodically clear this folder if you're sending sensitive images through the bot.
+- Use a **dedicated** Gmail account for this, not your primary one — the OAuth scope (`gmail.modify`) grants read/modify access to the whole inbox, and the account will also be the one at risk if Google flags the automation (see [Disclaimer](#disclaimer)).
 
 ## License
 
-Distributed under the MIT License. See the \`LICENSE\` file for more details.
-
----
+MIT — see the repository's [`LICENSE`](../LICENSE) file (also duplicated in this folder as [`LICENSE`](LICENSE)).
 
 ## Disclaimer
 
-**BEWARE:** Google may ban your Google Voice account if they find out you are using it for automated chatbot interactions. Use this tool responsibly and at your own risk.
+**Use at your own risk.** Google Voice's terms don't anticipate automated, bot-driven texting, and Google may flag or suspend a Google Voice (or the underlying Google) account it detects behaving this way. Consider this an experimental/hobby setup, not something to depend on for anything important.

@@ -7,3 +7,9 @@ venv/
 .env
 .DS_Store
 .vscode/
+
+# Google-Voice: Gmail OAuth secrets/tokens and saved MMS attachments.
+# These hold live credentials and other people's message content - never commit them.
+credentials.json
+token.pickle
+attachments/
